@@ -105,7 +105,7 @@ while (true)
 async Task<decimal> GetBinancePrice()
 {
     using var client = new HttpClient();
-    var json = await client.GetStringAsync("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    var json = await client.GetStringAsync("https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT");
     dynamic? data = JsonConvert.DeserializeObject(json);
     return data?.price != null ? (decimal)data.price : 0;
 }
