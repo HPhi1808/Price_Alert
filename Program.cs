@@ -114,43 +114,66 @@ while (true)
 // 1. Hàm lấy giá Binance
 // Nhận tham số symbol động
 // Đổi tên hàm cho đúng ý nghĩa
-async Task<decimal> GetCryptoPrice(string symbol)
+// --- HÀM LẤY GIÁ V3: COINBASE (MỚI) + BINANCE (BACKUP) ---
+async Task<decimal> GetCryptoPrice(string rawSymbol)
 {
+    // 1. Xử lý tên Symbol: BTCUSDT -> BTC
+    string symbol = rawSymbol.Replace("USDT", "").ToUpper(); 
+    
+    // --- ƯU TIÊN 1: COINBASE (Cực nhanh, không Cache) ---
     try 
     {
         using var client = new HttpClient();
+        // Thêm Header giả danh trình duyệt để tránh bị chặn
+        client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
         
-        // 1. Chuyển đổi Symbol sang ID của CoinCap
-        // CoinCap dùng id là 'bitcoin', 'ethereum' chứ không dùng 'BTCUSDT'
-        string coinId = "bitcoin"; 
-        if (symbol.StartsWith("ETH")) coinId = "ethereum";
-        if (symbol.StartsWith("BNB")) coinId = "binance-coin";
-        if (symbol.StartsWith("SOL")) coinId = "solana";
-        if (symbol == "GOLD") return 2035; // Vàng vẫn phải xử lý riêng nếu chưa có API
-
-        // 2. Gọi API CoinCap (Thêm timestamp để chống Cache)
-        var url = $"https://api.coincap.io/v2/assets/{coinId}?t={DateTime.Now.Ticks}";
+        // URL Coinbase: https://api.coinbase.com/v2/prices/BTC-USD/spot
+        var url = $"https://api.coinbase.com/v2/prices/{symbol}-USD/spot";
         
         var json = await client.GetStringAsync(url);
         
-        // 3. Phân tích JSON
-        // Cấu trúc CoinCap: { "data": { "priceUsd": "89000.123" } }
-        dynamic? response = JsonConvert.DeserializeObject(json);
-        string priceString = response?.data?.priceUsd;
+        // Cấu trúc JSON: {"data":{"base":"BTC","currency":"USD","amount":"89320.50"}}
+        dynamic? data = JsonConvert.DeserializeObject(json);
+        string priceStr = data?.data?.amount;
         
-        if (decimal.TryParse(priceString, out decimal price))
+        if (decimal.TryParse(priceStr, out decimal price)) 
         {
-            return price;
+            return price; // Trả về ngay nếu có giá
         }
-        
-        return 0;
     } 
     catch (Exception ex)
-    { 
-        Console.WriteLine($"⚠️ Lỗi lấy giá {symbol}: {ex.Message}");
-        return 0; 
+    {
+        // Chỉ in lỗi nếu cần debug, không thì bỏ qua để chạy nguồn tiếp theo
+        // Console.WriteLine($"⚠️ Coinbase lỗi: {ex.Message}");
     }
+
+    // --- ƯU TIÊN 2: BINANCE US (Kỹ thuật Cache Busting cực mạnh) ---
+    try 
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue 
+        { 
+            NoCache = true, 
+            NoStore = true 
+        };
+
+        // Thêm tham số ngẫu nhiên Guid.NewGuid() để đảm bảo URL là DUY NHẤT 100%
+        // Server không thể trả cache cũ vì URL chưa từng tồn tại
+        var url = $"https://api.binance.us/api/v3/ticker/price?symbol={rawSymbol}&rand={Guid.NewGuid()}";
+        
+        var json = await client.GetStringAsync(url);
+        dynamic? data = JsonConvert.DeserializeObject(json);
+        
+        if (data?.price != null) return (decimal)data.price;
+    } 
+    catch 
+    {
+        Console.WriteLine("❌ Cả Coinbase và Binance đều lỗi mạng!");
+    }
+
+    return 0;
 }
+
 // 2. Hàm gửi Email qua Resend SMTP
 void SendEmail(string toEmail, string type, decimal price, string symbol, string apiKey)
 {
@@ -158,9 +181,10 @@ void SendEmail(string toEmail, string type, decimal price, string symbol, string
     {
         var smtpClient = new SmtpClient("smtp.resend.com")
         {
-            Port = 587,
+            Port = 2525,
             Credentials = new NetworkCredential("resend", apiKey),
             EnableSsl = true,
+            Timeout = 20000
         };
 
         var mailMessage = new MailMessage
