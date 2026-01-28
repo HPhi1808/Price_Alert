@@ -179,29 +179,52 @@ void SendEmail(string toEmail, string type, decimal price, string symbol, string
 {
     try
     {
+        // --- CẤU HÌNH SMTP CHO MÔI TRƯỜNG CLOUD ---
         var smtpClient = new SmtpClient("smtp.resend.com")
         {
-            Port = 2525,
+            Port = 2525, // QUAN TRỌNG: Đổi từ 587 sang 2525 để né tường lửa Render
             Credentials = new NetworkCredential("resend", apiKey),
-            EnableSsl = true,
-            Timeout = 20000
+            EnableSsl = true, // Bắt buộc mã hóa
+            
+            // Tăng thời gian chờ lên 20 giây (mặc định 100s đôi khi quá lâu làm treo app)
+            Timeout = 20000, 
+            
+            // Cấu hình gửi từng cái một để tránh bị coi là spam
+            DeliveryMethod = SmtpDeliveryMethod.Network,
+            UseDefaultCredentials = false
         };
 
         var mailMessage = new MailMessage
         {
-            From = new MailAddress("noreply@uth.asia", "Price Alert Bot"),
-            Subject = $"🚨 CẢNH BÁO: {type}",
-            Body = $"<h1>Giá {symbol} đã chạm ngưỡng!</h1><p>Giá hiện tại: <b>{price} USD</b></p>",
+            From = new MailAddress("noreply@uth.asia", "Price Alert System"),
+            Subject = $"🚨 {symbol} Biến Động: {type}",
+            Body = $@"
+                <div style='font-family: Arial, sans-serif;'>
+                    <h2 style='color: #d32f2f;'>Thông báo giá {symbol}</h2>
+                    <p>Hệ thống ghi nhận mức giá:</p>
+                    <h1 style='color: #2e7d32;'>${price:#,##0.00} USD</h1>
+                    <p>Trạng thái: <b>{type}</b></p>
+                    <hr>
+                    <small>Gửi qua giao thức SMTP Port 2525</small>
+                </div>",
             IsBodyHtml = true,
         };
 
         mailMessage.To.Add(toEmail);
+
+        // Gửi mail
         smtpClient.Send(mailMessage);
-        Console.WriteLine($"📧 Đã gửi email tới {toEmail}");
+        
+        Console.WriteLine($"📧 [SMTP] Đã gửi thành công tới {toEmail}");
+    }
+    catch (SmtpException smtpEx)
+    {
+        // In chi tiết lỗi SMTP để dễ viết vào báo cáo
+        Console.WriteLine($"⚠️ Lỗi SMTP (Code {smtpEx.StatusCode}): {smtpEx.Message}");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"⚠️ Lỗi gửi mail: {ex.Message}");
+        Console.WriteLine($"❌ Lỗi gửi mail: {ex.Message}");
     }
 }
 
