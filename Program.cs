@@ -34,84 +34,102 @@ app.MapGet("/", () => "Worker C# is running...");
 _ = app.RunAsync($"http://0.0.0.0:{port}");
 
 // --- 3. VÒNG LẶP WORKER ---
+// --- 3. VÒNG LẶP WORKER (LOGIC MỚI) ---
 while (true)
 {
     try
     {
-        Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss}] ⏳ Đang quét dữ liệu...");
+        Console.WriteLine($"\n[{DateTime.Now:HH:mm:ss}] ⏳ Quét lệnh...");
 
-        // A. Lấy giá BTC từ Binance (API công khai)
-        decimal currentPrice = await GetBinancePrice();
-        Console.WriteLine($"💰 Giá BTC hiện tại: {currentPrice} USD");
-
-        // B. Lấy danh sách lệnh từ Supabase (Active & Chưa hết hạn)
-        // Lưu ý: Thư viện Supabase C# dùng Model để map dữ liệu
+        // B1. Lấy TẤT CẢ lệnh đang chờ
         var response = await supabase.From<PriceAlert>()
                                      .Select("*")
-                                     // SỬA LỖI Ở ĐÂY: Đổi true thành "true" (dạng chuỗi)
                                      .Filter("is_active", Postgrest.Constants.Operator.Equals, "true")
                                      .Filter("status", Postgrest.Constants.Operator.Equals, "PENDING")
                                      .Get();
-
+        
         var alerts = response.Models;
-        Console.WriteLine($"📋 Tìm thấy {alerts.Count} lệnh đang chờ.");
 
-        // C. Duyệt và so sánh
-        foreach (var alert in alerts)
+        // B2. Lấy danh sách các cặp tiền cần check (Distinct)
+        var uniqueSymbols = alerts.Select(a => a.Symbol).Distinct().ToList();
+
+        if (uniqueSymbols.Count == 0) {
+            Console.WriteLine("💤 Không có lệnh nào cần xử lý.");
+        }
+
+        // B3. Duyệt từng Symbol để lấy giá và so sánh
+        foreach (var symbol in uniqueSymbols)
         {
-            // Bỏ qua nếu đã hết hạn (Check ngày tháng)
-            if (alert.ExpiryDate < DateTime.UtcNow) continue;
+            // Lấy giá của Symbol này (Dynamic URL)
+            decimal currentPrice = await GetBinancePrice(symbol);
+            if (currentPrice == 0) continue;
 
-            bool isTriggered = false;
-            string type = "";
+            Console.WriteLine($"💰 {symbol}: {currentPrice} USD");
 
-            if (alert.MinPrice > 0 && currentPrice <= alert.MinPrice)
+            // Lọc ra các lệnh thuộc Symbol này để check
+            var alertsForSymbol = alerts.Where(a => a.Symbol == symbol).ToList();
+
+            foreach (var alert in alertsForSymbol)
             {
-                isTriggered = true; type = "GIẢM SÂU (Min)";
-            }
-            else if (alert.MaxPrice > 0 && currentPrice >= alert.MaxPrice)
-            {
-                isTriggered = true; type = "TĂNG MẠNH (Max)";
-            }
+                if (alert.ExpiryDate < DateTime.UtcNow) continue;
 
-            if (isTriggered)
-            {
-                Console.WriteLine($"🔥 Trigger lệnh của: {alert.Email}");
+                bool isTriggered = false;
+                string type = "";
 
-                // Gửi Email
-                SendEmail(alert.Email, type, currentPrice, resendKey);
+                if (alert.MinPrice > 0 && currentPrice <= alert.MinPrice)
+                {
+                    isTriggered = true; type = $"GIẢM SÂU ({symbol})";
+                }
+                else if (alert.MaxPrice > 0 && currentPrice >= alert.MaxPrice)
+                {
+                    isTriggered = true; type = $"TĂNG MẠNH ({symbol})";
+                }
 
-                // Cập nhật trạng thái trong Database thành 'SENT'
-                await supabase.From<PriceAlert>()
-                              .Where(x => x.Id == alert.Id)
-                              .Set(x => x.Status, "SENT")
-                              .Set(x => x.IsActive, false)
-                              .Update();
+                if (isTriggered)
+                {
+                    Console.WriteLine($"🔥 Trigger {symbol} cho: {alert.Email}");
+                    
+                    SendEmail(alert.Email!, type, currentPrice, symbol, resendKey!);
+
+                    // Update DB
+                    await supabase.From<PriceAlert>()
+                                  .Where(x => x.Id == alert.Id)
+                                  .Set(x => x.Status, "SENT")
+                                  .Set(x => x.IsActive, false)
+                                  .Update();
+                }
             }
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"❌ Lỗi vòng lặp: {ex.Message}");
+        Console.WriteLine($"❌ Lỗi: {ex.Message}");
     }
 
-    // Nghỉ 10 giây
     await Task.Delay(10000);
 }
 
 // --- CÁC HÀM HỖ TRỢ ---
 
 // 1. Hàm lấy giá Binance
-async Task<decimal> GetBinancePrice()
+// Nhận tham số symbol động
+async Task<decimal> GetBinancePrice(string symbol)
 {
-    using var client = new HttpClient();
-    var json = await client.GetStringAsync("https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT");
-    dynamic? data = JsonConvert.DeserializeObject(json);
-    return data?.price != null ? (decimal)data.price : 0;
+    try {
+        using var client = new HttpClient();
+        // Thay thế phần đuôi URL bằng symbol được truyền vào
+        var url = $"https://api.binance.us/api/v3/ticker/price?symbol={symbol}";
+        var json = await client.GetStringAsync(url);
+        dynamic? data = JsonConvert.DeserializeObject(json);
+        return data?.price != null ? (decimal)data.price : 0;
+    } catch { 
+        Console.WriteLine($"⚠️ Lỗi lấy giá {symbol}");
+        return 0; 
+    }
 }
 
 // 2. Hàm gửi Email qua Resend SMTP
-void SendEmail(string toEmail, string type, decimal price, string apiKey)
+void SendEmail(string toEmail, string type, decimal price, string symbol, string apiKey)
 {
     try
     {
@@ -126,7 +144,7 @@ void SendEmail(string toEmail, string type, decimal price, string apiKey)
         {
             From = new MailAddress("noreply@uth.asia", "Price Alert Bot"),
             Subject = $"🚨 CẢNH BÁO: {type}",
-            Body = $"<h1>Giá BTC đã chạm ngưỡng!</h1><p>Giá hiện tại: <b>{price} USD</b></p>",
+            Body = $"<h1>Giá {symbol} đã chạm ngưỡng!</h1><p>Giá hiện tại: <b>{price} USD</b></p>",
             IsBodyHtml = true,
         };
 
@@ -140,28 +158,16 @@ void SendEmail(string toEmail, string type, decimal price, string apiKey)
     }
 }
 
-// --- MODEL DATABASE ---
+// --- MODEL CẬP NHẬT (Thêm Symbol) ---
 [Table("price_alerts")]
 public class PriceAlert : BaseModel
 {
-    [Column("id")]
-    public string? Id { get; set; } // Thêm dấu ?
-
-    [Column("email")]
-    public string? Email { get; set; }
-
-    [Column("min_price")]
-    public decimal MinPrice { get; set; }
-
-    [Column("max_price")]
-    public decimal MaxPrice { get; set; }
-
-    [Column("is_active")]
-    public bool IsActive { get; set; }
-
-    [Column("status")]
-    public string? Status { get; set; }
-
-    [Column("expiry_date")]
-    public DateTime ExpiryDate { get; set; }
+    [Column("id")] public string? Id { get; set; }
+    [Column("email")] public string? Email { get; set; }
+    [Column("symbol")] public string Symbol { get; set; } = "BTCUSDT";
+    [Column("min_price")] public decimal MinPrice { get; set; }
+    [Column("max_price")] public decimal MaxPrice { get; set; }
+    [Column("is_active")] public bool IsActive { get; set; }
+    [Column("status")] public string? Status { get; set; }
+    [Column("expiry_date")] public DateTime ExpiryDate { get; set; }
 }
