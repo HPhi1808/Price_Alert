@@ -61,7 +61,7 @@ while (true)
         foreach (var symbol in uniqueSymbols)
         {
             // Lấy giá của Symbol này (Dynamic URL)
-            decimal currentPrice = await GetBinancePrice(symbol);
+            decimal currentPrice = await GetCryptoPrice(symbol);
             if (currentPrice == 0) continue;
 
             Console.WriteLine($"💰 {symbol}: {currentPrice} USD");
@@ -113,21 +113,44 @@ while (true)
 
 // 1. Hàm lấy giá Binance
 // Nhận tham số symbol động
-async Task<decimal> GetBinancePrice(string symbol)
+// Đổi tên hàm cho đúng ý nghĩa
+async Task<decimal> GetCryptoPrice(string symbol)
 {
-    try {
+    try 
+    {
         using var client = new HttpClient();
-        // Thay thế phần đuôi URL bằng symbol được truyền vào
-        var url = $"https://api.binance.us/api/v3/ticker/price?symbol={symbol}";
+        
+        // 1. Chuyển đổi Symbol sang ID của CoinCap
+        // CoinCap dùng id là 'bitcoin', 'ethereum' chứ không dùng 'BTCUSDT'
+        string coinId = "bitcoin"; 
+        if (symbol.StartsWith("ETH")) coinId = "ethereum";
+        if (symbol.StartsWith("BNB")) coinId = "binance-coin";
+        if (symbol.StartsWith("SOL")) coinId = "solana";
+        if (symbol == "GOLD") return 2035; // Vàng vẫn phải xử lý riêng nếu chưa có API
+
+        // 2. Gọi API CoinCap (Thêm timestamp để chống Cache)
+        var url = $"https://api.coincap.io/v2/assets/{coinId}?t={DateTime.Now.Ticks}";
+        
         var json = await client.GetStringAsync(url);
-        dynamic? data = JsonConvert.DeserializeObject(json);
-        return data?.price != null ? (decimal)data.price : 0;
-    } catch { 
-        Console.WriteLine($"⚠️ Lỗi lấy giá {symbol}");
+        
+        // 3. Phân tích JSON
+        // Cấu trúc CoinCap: { "data": { "priceUsd": "89000.123" } }
+        dynamic? response = JsonConvert.DeserializeObject(json);
+        string priceString = response?.data?.priceUsd;
+        
+        if (decimal.TryParse(priceString, out decimal price))
+        {
+            return price;
+        }
+        
+        return 0;
+    } 
+    catch (Exception ex)
+    { 
+        Console.WriteLine($"⚠️ Lỗi lấy giá {symbol}: {ex.Message}");
         return 0; 
     }
 }
-
 // 2. Hàm gửi Email qua Resend SMTP
 void SendEmail(string toEmail, string type, decimal price, string symbol, string apiKey)
 {
